@@ -14,19 +14,23 @@ Usage:
     uv run nameplate "Dr. J. Doe" --font-size 64 --out-dir out
 
 Outputs (in --out-dir, default "."):
+    <name>.3mf         one object, two parts (plate black, lettering white):
+                       open directly in Bambu Studio / Orca / PrusaSlicer and
+                       assign a filament per part
     <name>.scad        parametric OpenSCAD model, plate black / text white
     <name>.stl         plate + lettering unioned into one body
-    <name>_plate.stl   plate only   (black)   } load as two parts in the
-    <name>_text.stl    lettering    (white)   } slicer for multi-colour prints
-STL carries no colour; the split files are how colour reaches the printer.
+    <name>_plate.stl   plate only   (black)   } same as the 3MF parts, for
+    <name>_text.stl    lettering    (white)   } slicers without 3MF import
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import math
 import re
 import sys
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -272,6 +276,66 @@ def positive(value: str) -> float:
     return f
 
 
+def write_3mf(path: Path, name: str, plate: trimesh.Trimesh, lettering: trimesh.Trimesh) -> None:
+    """Plain 3MF: one build item whose object is two components (plate, lettering).
+
+    Slicers derived from PrusaSlicer (Bambu Studio, Orca, PrusaSlicer) load an
+    object with components as a single object with multiple parts, so the parts
+    keep their relative placement and can be assigned separate filaments. Each
+    component carries a base material colour (black / white) for viewers.
+    """
+
+    def mesh_xml(obj_id: int, part: str, mesh: trimesh.Trimesh, pindex: int) -> str:
+        v = "".join(f'<vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>' for x, y, z in mesh.vertices)
+        t = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in mesh.faces)
+        return (
+            f'<object id="{obj_id}" name="{part}" type="model" pid="1" pindex="{pindex}">'
+            f"<mesh><vertices>{v}</vertices><triangles>{t}</triangles></mesh></object>"
+        )
+
+    esc = html.escape(name, quote=True)
+    model = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<model unit="millimeter" xml:lang="en-US" '
+        'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+        '<metadata name="Title">' + esc + "</metadata>"
+        '<metadata name="Application">nameplate</metadata>'
+        "<resources>"
+        '<basematerials id="1">'
+        '<base name="plate (black)" displaycolor="#000000FF"/>'
+        '<base name="lettering (white)" displaycolor="#FFFFFFFF"/>'
+        "</basematerials>"
+        + mesh_xml(2, "plate", plate, 0)
+        + mesh_xml(3, "lettering", lettering, 1)
+        + f'<object id="4" name="{esc}" type="model"><components>'
+        '<component objectid="2"/><component objectid="3"/>'
+        "</components></object>"
+        "</resources>"
+        '<build><item objectid="4"/></build>'
+        "</model>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" '
+        'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="model" '
+        'ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
+        "</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Target="/3D/3dmodel.model" Id="rel0" '
+        'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+        "</Relationships>"
+    )
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("3D/3dmodel.model", model)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("text", help="lettering to place on the plate")
@@ -386,11 +450,13 @@ def main() -> None:
     stem = a.name or safe_stem(a.text)
     paths = {
         "scad": a.out_dir / f"{stem}.scad",
+        "3mf": a.out_dir / f"{stem}.3mf",
         "stl": a.out_dir / f"{stem}.stl",
         "plate": a.out_dir / f"{stem}_plate.stl",
         "text": a.out_dir / f"{stem}_text.stl",
     }
     paths["scad"].write_text(scad_source(spec))
+    write_3mf(paths["3mf"], a.text, plate, lettering)
     combined.export(paths["stl"])
     plate.export(paths["plate"])
     lettering.export(paths["text"])

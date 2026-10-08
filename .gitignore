@@ -13,3 +13,4 @@ wheels/
 out/
 *.stl
 *.scad
+*.3mf

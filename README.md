@@ -26,12 +26,19 @@ Outputs, per run:
 
 | file                | content                                                   |
 | ------------------- | --------------------------------------------------------- |
+| `<name>.3mf`        | one object with two parts (plate black, lettering white) – open this in Bambu Studio / Orca / PrusaSlicer and assign a filament per part |
 | `<name>.scad`       | parametric OpenSCAD model, `color("black")` / `color("white")` |
 | `<name>.stl`        | plate and lettering unioned into one watertight body      |
-| `<name>_plate.stl`  | plate only – load as the black part in the slicer         |
-| `<name>_text.stl`   | lettering only – load as the white part                   |
+| `<name>_plate.stl`  | plate only – the black part, for slicers without 3MF import |
+| `<name>_text.stl`   | lettering only – the white part                           |
 
-STL carries no colour; use the two split files for multi-colour prints.
+### Multi-colour in Bambu Studio
+
+**File → Open** the `.3mf`. It loads as a single object with two parts already
+in place (no aligning); in the object list click the `lettering` part and pick
+the white filament, leave `plate` on black, slice. The STL pair does the same
+job: import both at once and answer *Yes* to "load as a single object with
+multiple parts".
 
 ### Parameters
 
