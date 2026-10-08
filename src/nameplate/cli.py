@@ -4,10 +4,10 @@ Geometry (defaults): 254 x 50.75 x 1.5 mm black plate, white lettering raised
 0.85 mm on top. Lettering reproduces the MakerWorld sign-maker preview: Noto
 Sans Regular with its faux-bold outline growth, centred in X, baseline placed
 as MakerWorld centres its text line box, and the same size-96 scale.
-The underside carries a full-length relief channel for the holder's screw head
-(6.6 x 0.9 mm, 21.6..28.2 mm from the bottom edge by default) so the plate
-slides in without rubbing. Print text-up: the channel is a short bridge on
-layer 1 and needs no support. Disable with --no-channel.
+Optional (--channel): a full-length relief channel on the underside for the
+holder's screw head (6.6 x 0.9 mm, 21.6..28.2 mm from the bottom edge by
+default) so the plate slides in without rubbing. Print text-up: the channel is
+a short bridge on layer 1 and needs no support.
 
 Usage:
     uv run nameplate "Jane Doe"
@@ -280,9 +280,9 @@ def main() -> None:
     )
 
     screw = ap.add_argument_group(
-        "screw relief channel (underside, full length; the holder's screw head rides in it)"
+        "screw relief channel (opt-in; underside, full length; the holder's screw head rides in it)"
     )
-    screw.add_argument("--no-channel", action="store_true", help="omit the channel")
+    screw.add_argument("--channel", action="store_true", help="cut the channel")
     screw.add_argument(
         "--screw-diameter",
         type=positive,
@@ -310,14 +310,14 @@ def main() -> None:
 
     font_size = fit_font_size(a.text, a.font_size, a.plate_width, a.plate_height, a.text_stroke)
     channel = {}
-    if not a.no_channel:
+    if a.channel:
         channel_w = a.screw_diameter + 2 * CHANNEL_SIDE_CLEARANCE
         channel_d = a.screw_height + CHANNEL_DEPTH_CLEARANCE
         channel_y = -a.plate_height / 2 + a.screw_offset - CHANNEL_SIDE_CLEARANCE + channel_w / 2
         if channel_d > a.plate_thickness - CHANNEL_MIN_WEB:
             ap.error(
                 f"channel {channel_d:.2f} mm deep leaves < {CHANNEL_MIN_WEB} mm of a "
-                f"{a.plate_thickness} mm plate; thicken the plate or use --no-channel"
+                f"{a.plate_thickness} mm plate; thicken the plate"
             )
         if channel_y + channel_w / 2 > a.plate_height / 2:
             ap.error("screw channel runs off the top edge of the plate")
