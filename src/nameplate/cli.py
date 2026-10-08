@@ -4,6 +4,10 @@ Geometry (defaults): 254 x 50.75 x 1.5 mm black plate, white lettering raised
 0.85 mm on top. Lettering reproduces the MakerWorld sign-maker preview: Noto
 Sans Regular with its faux-bold outline growth, centred in X, baseline placed
 as MakerWorld centres its text line box, and the same size-96 scale.
+The underside carries a full-length relief channel for the holder's screw head
+(6.6 x 0.9 mm, 21.6..28.2 mm from the bottom edge by default) so the plate
+slides in without rubbing. Print text-up: the channel is a short bridge on
+layer 1 and needs no support. Disable with --no-channel.
 
 Usage:
     uv run nameplate "Jane Doe"
@@ -36,6 +40,14 @@ PLATE_H = 50.75
 PLATE_T = 1.5
 TEXT_HEIGHT = 0.85  # lettering raised above the plate, mm
 MARGIN = 6.0  # min clearance from text to plate edge, mm
+# Screw head in the door holder rubs on the back of the plate: relieve it with a
+# full-length channel on the underside. Defaults measured on the office doors.
+SCREW_DIAMETER = 5.8  # head diameter, mm
+SCREW_OFFSET = 22.0  # bottom of the head, measured from the bottom edge of the plate, mm
+SCREW_HEIGHT = 0.7  # how far the head protrudes from the holder, mm
+CHANNEL_SIDE_CLEARANCE = 0.4  # per side, mm
+CHANNEL_DEPTH_CLEARANCE = 0.2  # mm; one layer at 0.2 mm
+CHANNEL_MIN_WEB = 0.4  # material that must remain above the channel, mm
 DEFAULT_FONT_SIZE = 96.0
 # MakerWorld sign-maker "font size" -> em height in mm. Measured from a 254 mm
 # plate screenshot at size 96: text line box 23.4 mm = 1.16 * em (Fabric.js
@@ -141,11 +153,23 @@ class Spec:
     plate_h: float
     plate_t: float
     text_h: float  # lettering raised above the plate
+    channel_w: float = 0.0  # underside relief channel width (0 = none)
+    channel_d: float = 0.0  # channel depth into the underside
+    channel_y: float = 0.0  # channel centreline, from plate centre
+
+    @property
+    def has_channel(self) -> bool:
+        return self.channel_w > 0 and self.channel_d > 0
 
 
 def build_meshes(s: Spec) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
     plate = trimesh.creation.box(extents=(s.plate_w, s.plate_h, s.plate_t))
     plate.apply_translation((0, 0, s.plate_t / 2))
+    if s.has_channel:
+        # Open at both ends so the plate slides into the holder past the screw.
+        channel = trimesh.creation.box(extents=(s.plate_w + 2, s.channel_w, 2 * s.channel_d))
+        channel.apply_translation((0, s.channel_y, 0))  # straddles z=0: cut depth channel_d
+        plate = trimesh.boolean.difference([plate, channel], engine="manifold")
 
     polys = text_polygons(s.text, s.font_size, s.stroke)
     minx, _, maxx, _ = polys.bounds
@@ -174,12 +198,20 @@ plate_w    = {s.plate_w};
 plate_h    = {s.plate_h};
 plate_t    = {s.plate_t};
 text_h     = {s.text_h};
+channel_w  = {s.channel_w:.3f};   // underside screw-relief channel, 0 = none
+channel_d  = {s.channel_d:.3f};
+channel_y  = {s.channel_y:.3f};   // centreline from plate centre
 $fn        = {CURVE_SEGMENTS};
 
 module plate() {{
     color("black")
-        translate([-plate_w / 2, -plate_h / 2, 0])
-            cube([plate_w, plate_h, plate_t]);
+        difference() {{
+            translate([-plate_w / 2, -plate_h / 2, 0])
+                cube([plate_w, plate_h, plate_t]);
+            if (channel_w > 0 && channel_d > 0)
+                translate([-plate_w / 2 - 1, channel_y - channel_w / 2, -channel_d])
+                    cube([plate_w + 2, channel_w, 2 * channel_d]);
+        }}
 }}
 
 module lettering() {{
@@ -246,6 +278,29 @@ def main() -> None:
         help="extra stroke thickness per side, mm; 0 = plain Noto Sans Regular "
         "(default: MakerWorld faux-bold, em/64)",
     )
+
+    screw = ap.add_argument_group(
+        "screw relief channel (underside, full length; the holder's screw head rides in it)"
+    )
+    screw.add_argument("--no-channel", action="store_true", help="omit the channel")
+    screw.add_argument(
+        "--screw-diameter",
+        type=positive,
+        default=SCREW_DIAMETER,
+        help="screw head diameter, mm (default: %(default)s)",
+    )
+    screw.add_argument(
+        "--screw-offset",
+        type=positive,
+        default=SCREW_OFFSET,
+        help="bottom edge of the head from the bottom edge of the plate, mm (default: %(default)s)",
+    )
+    screw.add_argument(
+        "--screw-height",
+        type=positive,
+        default=SCREW_HEIGHT,
+        help="how far the head protrudes from the holder, mm (default: %(default)s)",
+    )
     a = ap.parse_args()
 
     if not a.text.strip():
@@ -254,6 +309,19 @@ def main() -> None:
         ap.error("--text-stroke must be >= 0")
 
     font_size = fit_font_size(a.text, a.font_size, a.plate_width, a.plate_height, a.text_stroke)
+    channel = {}
+    if not a.no_channel:
+        channel_w = a.screw_diameter + 2 * CHANNEL_SIDE_CLEARANCE
+        channel_d = a.screw_height + CHANNEL_DEPTH_CLEARANCE
+        channel_y = -a.plate_height / 2 + a.screw_offset - CHANNEL_SIDE_CLEARANCE + channel_w / 2
+        if channel_d > a.plate_thickness - CHANNEL_MIN_WEB:
+            ap.error(
+                f"channel {channel_d:.2f} mm deep leaves < {CHANNEL_MIN_WEB} mm of a "
+                f"{a.plate_thickness} mm plate; thicken the plate or use --no-channel"
+            )
+        if channel_y + channel_w / 2 > a.plate_height / 2:
+            ap.error("screw channel runs off the top edge of the plate")
+        channel = {"channel_w": channel_w, "channel_d": channel_d, "channel_y": channel_y}
     spec = Spec(
         text=a.text,
         font_size=font_size,
@@ -262,6 +330,7 @@ def main() -> None:
         plate_h=a.plate_height,
         plate_t=a.plate_thickness,
         text_h=a.text_height,
+        **channel,
     )
     plate, lettering = build_meshes(spec)
     combined = trimesh.boolean.union([plate, lettering], engine="manifold")
@@ -285,6 +354,15 @@ def main() -> None:
         f"text bbox   : {hi[0] - lo[0]:.2f} x {hi[1] - lo[1]:.2f} mm, "
         f"z {lo[2]:.2f}..{hi[2]:.2f}, centre ({(lo[0] + hi[0]) / 2:.3f}, {(lo[1] + hi[1]) / 2:.3f})"
     )
+    if spec.has_channel:
+        y0 = spec.channel_y - spec.channel_w / 2 + spec.plate_h / 2
+        print(
+            f"channel     : {spec.channel_w:.2f} wide x {spec.channel_d:.2f} deep, "
+            f"y {y0:.2f}..{y0 + spec.channel_w:.2f} from bottom edge, "
+            f"web {spec.plate_t - spec.channel_d:.2f} mm"
+        )
+    else:
+        print("channel     : none")
     print(f"watertight  : {combined.is_watertight}")
     for k, p in paths.items():
         print(f"{k:<12}: {p}")
