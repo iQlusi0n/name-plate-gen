@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import trimesh
@@ -33,7 +34,7 @@ from shapely.ops import unary_union
 PLATE_W = 254.0
 PLATE_H = 50.75
 PLATE_T = 1.5
-TEXT_RAISE = 0.85
+TEXT_HEIGHT = 0.85  # lettering raised above the plate, mm
 MARGIN = 6.0  # min clearance from text to plate edge, mm
 DEFAULT_FONT_SIZE = 96.0
 # MakerWorld sign-maker "font size" -> em height in mm. Measured from a 254 mm
@@ -65,8 +66,8 @@ def font_properties() -> FontProperties:
     return fp
 
 
-def text_polygons(text: str, font_size: float) -> MultiPolygon:
-    """Glyph outlines for `text` as a MultiPolygon in mm, baseline at y=0, emboldened."""
+def text_polygons(text: str, font_size: float, stroke: float) -> MultiPolygon:
+    """Glyph outlines for `text` as a MultiPolygon in mm, baseline at y=0, grown by `stroke`."""
     path = TextPath((0, 0), text, size=font_size, prop=font_properties())
     rings = [Polygon(r) for r in path.to_polygons() if len(r) >= 3]
     rings = [r.buffer(0) for r in rings]
@@ -85,21 +86,39 @@ def text_polygons(text: str, font_size: float) -> MultiPolygon:
             if d == depth[i] + 1 and rings[i].contains(rings[j])
         ]
         polys.append(Polygon(rings[i].exterior.coords, holes).buffer(0))
-    merged = unary_union(polys).buffer(font_size * EMBOLDEN_EM, join_style="mitre", mitre_limit=2.0)
+    merged = unary_union(polys)
+    if stroke:
+        merged = merged.buffer(stroke, join_style="mitre", mitre_limit=2.0)
     if isinstance(merged, Polygon):
         merged = MultiPolygon([merged])
     return merged
 
 
-def fit_font_size(text: str, requested: float, plate_w: float, plate_h: float) -> float:
+def stroke_mm(font_size: float, override: float | None) -> float:
+    """Outline growth per side: MakerWorld's faux bold (em/64) unless overridden in mm."""
+    return font_size * EMBOLDEN_EM if override is None else override
+
+
+def fit_font_size(
+    text: str, requested: float, plate_w: float, plate_h: float, stroke: float | None
+) -> float:
     """Requested size (MakerWorld units) as em mm, clamped so the glyphs fit the margins."""
-    minx, miny, maxx, maxy = (v / 100.0 for v in text_polygons(text, 100.0).bounds)
+    minx, miny, maxx, maxy = (v / 100.0 for v in text_polygons(text, 100.0, 0.0).bounds)
     half_h = plate_h / 2 - MARGIN
+
+    def limit(per_em: float, avail: float, sides: int) -> float:
+        # extent(size) = per_em * size + sides * stroke(size) <= avail
+        if stroke is None:
+            return avail / (per_em + sides * EMBOLDEN_EM)
+        return (avail - sides * stroke) / per_em
+
     max_mm = min(
-        (plate_w - 2 * MARGIN) / (maxx - minx),
-        half_h / (maxy + BASELINE_EM),  # ascenders vs top edge
-        half_h / -(miny + BASELINE_EM),  # descenders vs bottom edge
+        limit(maxx - minx, plate_w - 2 * MARGIN, 2),
+        limit(maxy + BASELINE_EM, half_h, 1),  # ascenders vs top edge
+        limit(-(miny + BASELINE_EM), half_h, 1),  # descenders vs bottom edge
     )
+    if max_mm <= 0:
+        raise SystemExit("plate too small for this text/stroke at any size")
     requested_mm = requested * SIZE_TO_MM
     if requested_mm > max_mm:
         print(
@@ -111,41 +130,50 @@ def fit_font_size(text: str, requested: float, plate_w: float, plate_h: float) -
     return requested_mm
 
 
-def build_meshes(
-    text: str, font_size: float, plate_w: float, plate_h: float, plate_t: float, raise_h: float
-) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
-    plate = trimesh.creation.box(extents=(plate_w, plate_h, plate_t))
-    plate.apply_translation((0, 0, plate_t / 2))
+@dataclass(frozen=True)
+class Spec:
+    """Resolved plate geometry, all mm."""
 
-    polys = text_polygons(text, font_size)
+    text: str
+    font_size: float  # em
+    stroke: float  # outline growth per side
+    plate_w: float
+    plate_h: float
+    plate_t: float
+    text_h: float  # lettering raised above the plate
+
+
+def build_meshes(s: Spec) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
+    plate = trimesh.creation.box(extents=(s.plate_w, s.plate_h, s.plate_t))
+    plate.apply_translation((0, 0, s.plate_t / 2))
+
+    polys = text_polygons(s.text, s.font_size, s.stroke)
     minx, _, maxx, _ = polys.bounds
-    dx, dy = -(minx + maxx) / 2, BASELINE_EM * font_size  # x: bbox centre; y: fixed baseline
+    dx, dy = -(minx + maxx) / 2, BASELINE_EM * s.font_size  # x: bbox centre; y: fixed baseline
 
     parts = []
     for poly in polys.geoms:
-        m = trimesh.creation.extrude_polygon(poly, height=raise_h)
-        m.apply_translation((dx, dy, plate_t))
+        m = trimesh.creation.extrude_polygon(poly, height=s.text_h)
+        m.apply_translation((dx, dy, s.plate_t))
         parts.append(m)
     lettering = trimesh.util.concatenate(parts)
     return plate, lettering
 
 
-def scad_source(
-    text: str, font_size: float, plate_w: float, plate_h: float, plate_t: float, raise_h: float
-) -> str:
-    esc = text.replace("\\", "\\\\").replace('"', '\\"')
+def scad_source(s: Spec) -> str:
+    esc = s.text.replace("\\", "\\\\").replace('"', '\\"')
     return f"""// Generated by nameplate.py -- office door name plate
-// Plate: {plate_w} x {plate_h} x {plate_t} mm, lettering raised {raise_h} mm.
+// Plate: {s.plate_w} x {s.plate_h} x {s.plate_t} mm, lettering raised {s.text_h} mm.
 
 label      = "{esc}";
 font       = "{SCAD_FONT}";
-font_size  = {font_size:.3f};   // mm em (OpenSCAD's size param is not em; tune if rendering here)
-embolden   = {font_size * EMBOLDEN_EM:.3f};   // mm outline growth per side (MakerWorld faux-bold)
-baseline_y = {font_size * BASELINE_EM:.3f};   // mm, baseline below plate centre
-plate_w    = {plate_w};
-plate_h    = {plate_h};
-plate_t    = {plate_t};
-text_raise = {raise_h};
+font_size  = {s.font_size:.3f};   // mm em (OpenSCAD's size param is not em; tune if rendering here)
+stroke     = {s.stroke:.3f};   // mm outline growth per side (MakerWorld faux-bold)
+baseline_y = {s.font_size * BASELINE_EM:.3f};   // mm, baseline below plate centre
+plate_w    = {s.plate_w};
+plate_h    = {s.plate_h};
+plate_t    = {s.plate_t};
+text_h     = {s.text_h};
 $fn        = {CURVE_SEGMENTS};
 
 module plate() {{
@@ -157,8 +185,8 @@ module plate() {{
 module lettering() {{
     color("white")
         translate([0, baseline_y, plate_t])
-            linear_extrude(height = text_raise)
-                offset(delta = embolden)
+            linear_extrude(height = text_h)
+                offset(delta = stroke)
                     text(label, size = font_size, font = font,
                          halign = "center", valign = "baseline");
 }}
@@ -173,35 +201,69 @@ def safe_stem(text: str) -> str:
     return stem or "nameplate"
 
 
+def positive(value: str) -> float:
+    f = float(value)
+    if f <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return f
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("text", help="lettering to place on the plate")
-    ap.add_argument("--out-dir", type=Path, default=Path("."))
+    ap.add_argument("--out-dir", type=Path, default=Path("."), help="output directory (default: .)")
     ap.add_argument("--name", help="output file stem (default: derived from text)")
-    ap.add_argument(
-        "--font-size",
-        type=float,
-        default=DEFAULT_FONT_SIZE,
-        help=f"font size in MakerWorld sign-maker units (default {DEFAULT_FONT_SIZE:g} "
-        f"= {DEFAULT_FONT_SIZE * SIZE_TO_MM:.1f} mm em); clamped to fit the plate",
+
+    plate = ap.add_argument_group("plate dimensions (mm)")
+    plate.add_argument(
+        "--plate-width", type=positive, default=PLATE_W, help="X (default: %(default)s)"
     )
-    ap.add_argument("--width", type=float, default=PLATE_W, help="plate width mm")
-    ap.add_argument("--height", type=float, default=PLATE_H, help="plate height mm")
-    ap.add_argument("--thickness", type=float, default=PLATE_T, help="plate thickness mm")
-    ap.add_argument(
-        "--raise",
-        dest="raise_h",
+    plate.add_argument(
+        "--plate-height", type=positive, default=PLATE_H, help="Y (default: %(default)s)"
+    )
+    plate.add_argument(
+        "--plate-thickness", type=positive, default=PLATE_T, help="Z (default: %(default)s)"
+    )
+
+    text = ap.add_argument_group("lettering")
+    text.add_argument(
+        "--font-size",
+        type=positive,
+        default=DEFAULT_FONT_SIZE,
+        help=f"MakerWorld sign-maker units (96 = {96 * SIZE_TO_MM:.1f} mm em); "
+        "clamped to fit the plate (default: %(default)s)",
+    )
+    text.add_argument(
+        "--text-height",
+        type=positive,
+        default=TEXT_HEIGHT,
+        help="how far the lettering is raised above the plate, mm (default: %(default)s)",
+    )
+    text.add_argument(
+        "--text-stroke",
         type=float,
-        default=TEXT_RAISE,
-        help="lettering height above plate mm",
+        default=None,
+        help="extra stroke thickness per side, mm; 0 = plain Noto Sans Regular "
+        "(default: MakerWorld faux-bold, em/64)",
     )
     a = ap.parse_args()
 
     if not a.text.strip():
         ap.error("text must not be blank")
+    if a.text_stroke is not None and a.text_stroke < 0:
+        ap.error("--text-stroke must be >= 0")
 
-    font_size = fit_font_size(a.text, a.font_size, a.width, a.height)
-    plate, lettering = build_meshes(a.text, font_size, a.width, a.height, a.thickness, a.raise_h)
+    font_size = fit_font_size(a.text, a.font_size, a.plate_width, a.plate_height, a.text_stroke)
+    spec = Spec(
+        text=a.text,
+        font_size=font_size,
+        stroke=stroke_mm(font_size, a.text_stroke),
+        plate_w=a.plate_width,
+        plate_h=a.plate_height,
+        plate_t=a.plate_thickness,
+        text_h=a.text_height,
+    )
+    plate, lettering = build_meshes(spec)
     combined = trimesh.boolean.union([plate, lettering], engine="manifold")
 
     a.out_dir.mkdir(parents=True, exist_ok=True)
@@ -212,9 +274,7 @@ def main() -> None:
         "plate": a.out_dir / f"{stem}_plate.stl",
         "text": a.out_dir / f"{stem}_text.stl",
     }
-    paths["scad"].write_text(
-        scad_source(a.text, font_size, a.width, a.height, a.thickness, a.raise_h)
-    )
+    paths["scad"].write_text(scad_source(spec))
     combined.export(paths["stl"])
     plate.export(paths["plate"])
     lettering.export(paths["text"])

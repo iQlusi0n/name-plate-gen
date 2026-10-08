@@ -33,10 +33,23 @@ Outputs, per run:
 
 STL carries no colour; use the two split files for multi-colour prints.
 
-`--font-size` is in MakerWorld sign-maker units (96 ≈ 20.2 mm em, 14.4 mm
-capitals). Sizes that would overflow the plate are clamped with a warning.
-Plate dimensions and lettering height are overridable (`--width`, `--height`,
-`--thickness`, `--raise`).
+### Parameters
+
+| option              | default | meaning                                                    |
+| ------------------- | ------- | ---------------------------------------------------------- |
+| `--plate-width`     | 254     | plate X, mm                                                |
+| `--plate-height`    | 50.75   | plate Y, mm                                                |
+| `--plate-thickness` | 1.5     | plate Z, mm                                                |
+| `--text-height`     | 0.85    | how far the lettering is raised above the plate, mm        |
+| `--text-stroke`     | em/64   | extra stroke thickness per side, mm (`0` = plain Regular)  |
+| `--font-size`       | 96      | MakerWorld sign-maker units (96 ≈ 20.2 mm em, 14.4 mm caps) |
+
+Sizes that would overflow the plate (6 mm margin) are clamped with a warning.
+The default stroke reproduces MakerWorld's faux-bold rendering of Noto Sans.
+
+```sh
+uv run nameplate "Jane Doe" --plate-width 200 --plate-height 40 --text-height 1.2
+```
 
 ## Development
 
