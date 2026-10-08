@@ -5,9 +5,9 @@ Geometry (defaults): 254 x 50.75 x 1.5 mm black plate, white lettering raised
 Sans Regular with its faux-bold outline growth, centred in X, baseline placed
 as MakerWorld centres its text line box, and the same size-96 scale.
 Optional (--channel): a full-length relief channel on the underside for the
-holder's screw head (6.6 x 0.9 mm, 21.6..28.2 mm from the bottom edge by
-default) so the plate slides in without rubbing. Print text-up: the channel is
-a short bridge on layer 1 and needs no support.
+holder's screw head so the plate slides in without rubbing. Trapezoidal with
+45 deg walls (8.0 mm opening, 6.0 mm roof, 1.0 mm deep by default); printed
+text-up the walls are self-supporting and the roof a 6 mm bridge.
 
 Usage:
     uv run nameplate "Jane Doe"
@@ -24,6 +24,7 @@ STL carries no colour; the split files are how colour reaches the printer.
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -45,6 +46,10 @@ MARGIN = 6.0  # min clearance from text to plate edge, mm
 SCREW_DIAMETER = 5.8  # head diameter, mm
 SCREW_OFFSET = 22.0  # bottom of the head, measured from the bottom edge of the plate, mm
 SCREW_HEIGHT = 0.7  # how far the head protrudes from the holder, mm
+LAYER_HEIGHT = 0.2  # channel depth snaps up to whole layers so the roof is one clean bridge
+# Cross-section is a trapezoid: 45 deg walls (self-supporting) from the plate
+# surface up to a flat roof. Clearance is enforced at the screw head's height,
+# so the opening at the surface is wider than the head and the roof narrower.
 CHANNEL_SIDE_CLEARANCE = 0.4  # per side, mm
 CHANNEL_DEPTH_CLEARANCE = 0.2  # mm; one layer at 0.2 mm
 CHANNEL_MIN_WEB = 0.4  # material that must remain above the channel, mm
@@ -153,23 +158,39 @@ class Spec:
     plate_h: float
     plate_t: float
     text_h: float  # lettering raised above the plate
-    channel_w: float = 0.0  # underside relief channel width (0 = none)
-    channel_d: float = 0.0  # channel depth into the underside
-    channel_y: float = 0.0  # channel centreline, from plate centre
+    channel_w: float = 0.0  # underside relief channel: opening at the plate surface (0 = none)
+    channel_roof: float = 0.0  # flat roof width (bridge span)
+    channel_d: float = 0.0  # depth into the underside
+    channel_y: float = 0.0  # centreline, from plate centre
 
     @property
     def has_channel(self) -> bool:
         return self.channel_w > 0 and self.channel_d > 0
 
 
+def channel_mesh(s: Spec) -> trimesh.Trimesh:
+    """Trapezoidal cutter: 45 deg walls, open at both ends, extended 1 mm below z=0."""
+    y, w, r, d = s.channel_y, s.channel_w, s.channel_roof, s.channel_d
+    # (y, z) profile, counter-clockwise; walls continue below the surface at 45 deg
+    profile = Polygon(
+        [
+            (y - w / 2 - 1, -1),
+            (y + w / 2 + 1, -1),
+            (y + r / 2, d),
+            (y - r / 2, d),
+        ]
+    )
+    m = trimesh.creation.extrude_polygon(profile, height=s.plate_w + 2)
+    # extrude_polygon builds (u, v, w) = (y, z, x): permute axes, keep handedness
+    m.apply_transform([[0, 0, 1, -(s.plate_w + 2) / 2], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
+    return m
+
+
 def build_meshes(s: Spec) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
     plate = trimesh.creation.box(extents=(s.plate_w, s.plate_h, s.plate_t))
     plate.apply_translation((0, 0, s.plate_t / 2))
     if s.has_channel:
-        # Open at both ends so the plate slides into the holder past the screw.
-        channel = trimesh.creation.box(extents=(s.plate_w + 2, s.channel_w, 2 * s.channel_d))
-        channel.apply_translation((0, s.channel_y, 0))  # straddles z=0: cut depth channel_d
-        plate = trimesh.boolean.difference([plate, channel], engine="manifold")
+        plate = trimesh.boolean.difference([plate, channel_mesh(s)], engine="manifold")
 
     polys = text_polygons(s.text, s.font_size, s.stroke)
     minx, _, maxx, _ = polys.bounds
@@ -198,19 +219,30 @@ plate_w    = {s.plate_w};
 plate_h    = {s.plate_h};
 plate_t    = {s.plate_t};
 text_h     = {s.text_h};
-channel_w  = {s.channel_w:.3f};   // underside screw-relief channel, 0 = none
-channel_d  = {s.channel_d:.3f};
-channel_y  = {s.channel_y:.3f};   // centreline from plate centre
-$fn        = {CURVE_SEGMENTS};
+channel_w    = {s.channel_w:.3f};   // underside screw-relief channel: opening at surface, 0 = none
+channel_roof = {s.channel_roof:.3f};   // flat roof width
+channel_d    = {s.channel_d:.3f};
+channel_y    = {s.channel_y:.3f};   // centreline from plate centre
+$fn          = {CURVE_SEGMENTS};
+
+module channel() {{
+    // trapezoid in the YZ plane (45 deg walls), extruded along X through the plate
+    rotate([90, 0, 90])
+        linear_extrude(height = plate_w + 2, center = true)
+            polygon([
+                [channel_y - channel_w / 2 - 1, -1],
+                [channel_y + channel_w / 2 + 1, -1],
+                [channel_y + channel_roof / 2, channel_d],
+                [channel_y - channel_roof / 2, channel_d],
+            ]);
+}}
 
 module plate() {{
     color("black")
         difference() {{
             translate([-plate_w / 2, -plate_h / 2, 0])
                 cube([plate_w, plate_h, plate_t]);
-            if (channel_w > 0 && channel_d > 0)
-                translate([-plate_w / 2 - 1, channel_y - channel_w / 2, -channel_d])
-                    cube([plate_w + 2, channel_w, 2 * channel_d]);
+            if (channel_w > 0 && channel_d > 0) channel();
         }}
 }}
 
@@ -301,6 +333,12 @@ def main() -> None:
         default=SCREW_HEIGHT,
         help="how far the head protrudes from the holder, mm (default: %(default)s)",
     )
+    screw.add_argument(
+        "--layer-height",
+        type=positive,
+        default=LAYER_HEIGHT,
+        help="print layer height; channel depth rounds up to whole layers (default: %(default)s)",
+    )
     a = ap.parse_args()
 
     if not a.text.strip():
@@ -311,9 +349,13 @@ def main() -> None:
     font_size = fit_font_size(a.text, a.font_size, a.plate_width, a.plate_height, a.text_stroke)
     channel = {}
     if a.channel:
-        channel_w = a.screw_diameter + 2 * CHANNEL_SIDE_CLEARANCE
-        channel_d = a.screw_height + CHANNEL_DEPTH_CLEARANCE
-        channel_y = -a.plate_height / 2 + a.screw_offset - CHANNEL_SIDE_CLEARANCE + channel_w / 2
+        # Clearance at the head's top (z = screw_height); 45 deg walls widen it below.
+        clear_w = a.screw_diameter + 2 * CHANNEL_SIDE_CLEARANCE
+        channel_w = clear_w + 2 * a.screw_height  # opening at the surface
+        channel_d = math.ceil((a.screw_height + CHANNEL_DEPTH_CLEARANCE) / a.layer_height - 1e-9)
+        channel_d *= a.layer_height
+        channel_roof = channel_w - 2 * channel_d
+        channel_y = -a.plate_height / 2 + a.screw_offset + a.screw_diameter / 2  # head centre
         if channel_d > a.plate_thickness - CHANNEL_MIN_WEB:
             ap.error(
                 f"channel {channel_d:.2f} mm deep leaves < {CHANNEL_MIN_WEB} mm of a "
@@ -321,7 +363,12 @@ def main() -> None:
             )
         if channel_y + channel_w / 2 > a.plate_height / 2:
             ap.error("screw channel runs off the top edge of the plate")
-        channel = {"channel_w": channel_w, "channel_d": channel_d, "channel_y": channel_y}
+        channel = {
+            "channel_w": channel_w,
+            "channel_roof": channel_roof,
+            "channel_d": channel_d,
+            "channel_y": channel_y,
+        }
     spec = Spec(
         text=a.text,
         font_size=font_size,
@@ -357,8 +404,8 @@ def main() -> None:
     if spec.has_channel:
         y0 = spec.channel_y - spec.channel_w / 2 + spec.plate_h / 2
         print(
-            f"channel     : {spec.channel_w:.2f} wide x {spec.channel_d:.2f} deep, "
-            f"y {y0:.2f}..{y0 + spec.channel_w:.2f} from bottom edge, "
+            f"channel     : {spec.channel_w:.2f} wide at surface, {spec.channel_roof:.2f} roof, "
+            f"{spec.channel_d:.2f} deep, y {y0:.2f}..{y0 + spec.channel_w:.2f} from bottom edge, "
             f"web {spec.plate_t - spec.channel_d:.2f} mm"
         )
     else:

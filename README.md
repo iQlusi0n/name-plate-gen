@@ -55,8 +55,11 @@ uv run nameplate "Jane Doe" --plate-width 200 --plate-height 40 --text-height 1.
 
 If the door holder's screw head protrudes and rubs the back of the plate, pass
 `--channel` to cut a full-length channel in the underside (open at both ends so
-the plate slides in). Width = head diameter + 0.4 mm per side, depth =
-protrusion + 0.2 mm.
+the plate slides in). The cross-section is a trapezoid with 45° walls so the
+sides are self-supporting; only the flat roof is a short bridge. The head gets
+0.4 mm side clearance at its own height, so the opening at the surface is
+`diameter + 0.8 + 2 × protrusion` wide. Depth is `protrusion + 0.2 mm`, rounded
+up to whole layers (`--layer-height`, default 0.2).
 
 ```sh
 uv run nameplate "Jane Doe" --channel --screw-diameter 5.8 --screw-offset 22 --screw-height 0.7
@@ -67,12 +70,13 @@ uv run nameplate "Jane Doe" --channel --screw-diameter 5.8 --screw-offset 22 --s
 | `--screw-diameter` | 5.8     | screw head diameter, mm                               |
 | `--screw-offset`   | 22      | bottom edge of the head from the plate's bottom edge  |
 | `--screw-height`   | 0.7     | how far the head protrudes from the holder, mm        |
+| `--layer-height`   | 0.2     | print layer height, for snapping the channel depth    |
 | `--channel`        | off     | cut the channel                                       |
 
-Those defaults give a 6.6 × 0.9 mm channel at 21.6–28.2 mm from the bottom edge,
-leaving a 0.6 mm web. Print text side up: the channel is then a 6.6 mm bridge
-on the first layer over the bed, which prints cleanly without supports. The
-generator refuses channels that would leave less than 0.4 mm of plate.
+Those defaults give an 8.0 mm opening narrowing to a 6.0 mm roof, 1.0 mm deep,
+at 20.9–28.9 mm from the bottom edge, leaving a 0.5 mm web. Print text side up:
+the walls are 45° overhangs and the roof a 6 mm bridge on layer 6, no supports.
+The generator refuses channels that would leave less than 0.4 mm of plate.
 
 ## Development
 
